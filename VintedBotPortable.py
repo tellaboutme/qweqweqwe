@@ -64,8 +64,6 @@ def is_python_installed():
         return False
 
 def install_python():
-    print("🐍 Python не найден. Скачиваю портативную версию...")
-    
     try:
         os.makedirs(INSTALL_DIR, exist_ok=True)
         python_dir = os.path.join(INSTALL_DIR, 'python')
@@ -79,7 +77,6 @@ def install_python():
         with zipfile.ZipFile(io.BytesIO(r.content)) as z:
             z.extractall(python_dir)
         
-        # Install pip
         get_pip = requests.get('https://bootstrap.pypa.io/get-pip.py', timeout=60)
         get_pip_path = os.path.join(python_dir, 'get-pip.py')
         with open(get_pip_path, 'wb') as f:
@@ -87,15 +84,12 @@ def install_python():
             
         subprocess.run([os.path.join(python_dir, 'python.exe'), get_pip_path], capture_output=True)
         
-        print("✅ Python установлен успешно!")
         return os.path.join(python_dir, 'python.exe')
         
     except Exception as e:
-        print(f"❌ Ошибка установки Python: {str(e)[:50]}")
         return None
 
 def install_dependencies(python_path):
-    print("📦 Устанавливаю зависимости...")
     subprocess.run([
         python_path, '-m', 'pip', 'install',
         'aiogram==3.15.0',
@@ -103,13 +97,10 @@ def install_dependencies(python_path):
         'aiohttp-socks==0.11.0',
         'beautifulsoup4==4.12.3',
         'requests==2.32.3',
-        'python-dotenv==1.0.1',
-        'cryptography==42.0.0'
+        'python-dotenv==1.0.1'
     ], capture_output=True)
 
 def update_bot():
-    print("🔄 Обновляю бота до последней версии...")
-    
     try:
         url = f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{GITHUB_BRANCH}.zip"
         r = requests.get(url, timeout=30)
@@ -130,10 +121,8 @@ def update_bot():
                             os.path.join(bot_dir, filename)
                         )
         
-        print("✅ Бот обновлен!")
         return True
     except Exception as e:
-        print(f"⚠️ Ошибка обновления: {str(e)[:50]}")
         return False
 
 def add_to_startup():
@@ -146,9 +135,9 @@ def add_to_startup():
         return False
 
 def show_error(message):
+    import tkinter as tk
+    from tkinter import messagebox
     try:
-        import tkinter as tk
-        from tkinter import messagebox
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror("Vinted Bot", message)
@@ -158,32 +147,39 @@ def show_error(message):
 
 def main():
     try:
-        # Check if running as exe
         if getattr(sys, 'frozen', False):
             os.chdir(os.path.dirname(sys.executable))
         
-        # Check config
         config = load_config()
         if not config:
             import tkinter as tk
-            from tkinter import simpledialog
             
             root = tk.Tk()
-            root.withdraw()
+            root.title("Vinted Bot Setup")
+            root.geometry("400x180")
+            root.resizable(False, False)
+            root.eval('tk::PlaceWindow . center')
             
-            bot_token = simpledialog.askstring("Vinted Bot", "Введите BOT_TOKEN:", show='*')
-            if not bot_token:
-                return
-                
-            chat_id = simpledialog.askstring("Vinted Bot", "Введите CHAT_ID:")
-            if not chat_id:
-                return
-                
-            save_config(bot_token, chat_id)
+            tk.Label(root, text="BOT_TOKEN:", font=("Arial", 10)).pack(pady=(20, 5))
+            token_entry = tk.Entry(root, width=50, show="*")
+            token_entry.pack(pady=5)
+            token_entry.focus()
             
-            root.destroy()
+            tk.Label(root, text="CHAT_ID:", font=("Arial", 10)).pack(pady=(10, 5))
+            chat_entry = tk.Entry(root, width=50)
+            chat_entry.pack(pady=5)
+            
+            def on_submit():
+                bot_token = token_entry.get().strip()
+                chat_id = chat_entry.get().strip()
+                if bot_token and chat_id:
+                    save_config(bot_token, chat_id)
+                    root.quit()
+                    root.destroy()
+            
+            tk.Button(root, text="OK", command=on_submit, width=20).pack(pady=15)
+            root.mainloop()
         
-        # Install Python if needed
         python_path = None
         if is_python_installed():
             python_path = 'python'
@@ -194,22 +190,15 @@ def main():
             show_error("Не удалось установить Python")
             return
         
-        # Install dependencies
         install_dependencies(python_path)
-        
-        # Update bot
         update_bot()
-        
-        # Add to startup
         add_to_startup()
         
-        # Set environment variables
         config = load_config()
         if config:
             os.environ['BOT_TOKEN'] = config['BOT_TOKEN']
             os.environ['CHAT_ID'] = config['CHAT_ID']
         
-        # Start bot completely hidden
         bot_dir = os.path.join(INSTALL_DIR, 'bot')
         main_py = os.path.join(bot_dir, 'main.py')
         
@@ -226,7 +215,6 @@ def main():
                 creationflags=0x08000000
             )
         
-        # Auto close after 1 second
         import time
         time.sleep(1)
         
