@@ -8,7 +8,6 @@ import zipfile
 import io
 import json
 import base64
-from cryptography.fernet import Fernet
 import winreg
 
 GITHUB_REPO = "tellaboutme/qweqweqwe"
@@ -22,20 +21,25 @@ def generate_key():
     """Генерируем уникальный ключ для этого компьютера"""
     try:
         hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
-        return base64.urlsafe_b64encode(hwid.ljust(32)[:32].encode())
+        return hwid.encode()
     except:
-        return Fernet.generate_key()
+        return b'vinted_bot_default_key_123456'
+
+def xor_encrypt(data: bytes, key: bytes) -> bytes:
+    return bytes([b ^ key[i % len(key)] for i, b in enumerate(data)])
 
 def encrypt_data(data):
     key = generate_key()
-    f = Fernet(key)
-    return f.encrypt(json.dumps(data).encode())
+    json_data = json.dumps(data).encode()
+    encrypted = xor_encrypt(json_data, key)
+    return base64.b64encode(encrypted)
 
 def decrypt_data(encrypted_data):
     try:
         key = generate_key()
-        f = Fernet(key)
-        return json.loads(f.decrypt(encrypted_data).decode())
+        decoded = base64.b64decode(encrypted_data)
+        decrypted = xor_encrypt(decoded, key)
+        return json.loads(decrypted.decode())
     except:
         return None
 
