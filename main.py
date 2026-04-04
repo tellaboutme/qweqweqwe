@@ -47,6 +47,11 @@ from config import (
     PROXY_TEST_TIMEOUT,
 )
 
+if not BOT_TOKEN or not CHAT_ID:
+    print("❌ BOT_TOKEN or CHAT_ID environment variables not set!")
+    print("💡 Create .env file with BOT_TOKEN and CHAT_ID values")
+    sys.exit(1)
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -1194,7 +1199,8 @@ async def send_notification_with_image(item_url: str, title: str, price: str, im
         chat_id = settings['chat_id']
     
     # ✅ Защита от отправки сообщений самому себе и ботам
-    if not settings['valid_chat_id'] or chat_id == 8710493220:
+    bot_id = int(BOT_TOKEN.split(':')[0]) if BOT_TOKEN else 0
+    if not settings['valid_chat_id'] or chat_id == bot_id:
         print(f"⚠️ Пропускаю отправку: chat_id не валиден или это ID бота")
         return
 
