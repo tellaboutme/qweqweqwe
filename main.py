@@ -1570,18 +1570,76 @@ async def cmd_start(message: Message):
         await message.answer(f"✅ Chat ID автоматически сохранен: {user_chat_id}")
     
     proxy_status = "ON" if USE_PROXIES else "OFF"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    
+    base_buttons = [
         [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings")],
         [InlineKeyboardButton(text="📦 Load Latest Items", callback_data="load_latest")],
         [InlineKeyboardButton(text="🌐 Proxy (ON)" if USE_PROXIES else "🌐 Proxy (OFF)", callback_data="proxy_menu")],
         [InlineKeyboardButton(text="🔍 Monitoring URLs", callback_data="monitoring_menu")],
         [InlineKeyboardButton(text="▶️ Start Monitoring" if not is_monitoring else "⏹️ Stop Monitoring", callback_data="toggle_monitoring")],
-    ])
+    ]
+    
+    # Добавляем админ панель только для админа
+    if message.from_user.id == ADMIN_ID:
+        admin_buttons = [
+            [InlineKeyboardButton(text="👑 Admin Panel", callback_data="admin_panel")],
+        ]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=base_buttons + admin_buttons)
+    else:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=base_buttons)
+    
     await message.answer(
         "🤖 <b>Vinted Swear Bot</b>\n\nChoose an option:",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
+
+@router.callback_query(lambda c: c.data == "admin_panel")
+async def callback_admin_panel(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
+    current_time = time.time()
+    active_count = 0
+    for hwid, last_seen in active_devices.items():
+        if current_time - last_seen < 600:
+            active_count += 1
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📋 Active Devices ({active_count})", callback_data="devices")],
+        [InlineKeyboardButton(text="🛑 Stop All Bots", callback_data="stopall")],
+        [InlineKeyboardButton(text="🔄 Restart All Bots", callback_data="restartall")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
+    ])
+    
+    await callback.message.edit_text(
+        "👑 <b>Admin Panel</b>\n\nТолько для администратора",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "stopall")
+async def callback_stop_all(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
+    await callback.answer("🛑 Отправляю команду остановки всем ботам!")
+    await bot.send_message(chat_id=settings['chat_id'], text="🛑 STOP ALL")
+    is_stopped = True
+    stop_monitoring()
+    await bot.session.close()
+    sys.exit(0)
+
+@router.callback_query(lambda c: c.data == "restartall")
+async def callback_restart_all(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
+    await callback.answer("🔄 Отправляю команду перезапуска всем ботам!")
+    await bot.send_message(chat_id=settings['chat_id'], text="🔄 RESTART ALL")
 
 @router.callback_query(lambda c: c.data == "toggle_monitoring")
 async def callback_toggle_monitoring(callback: CallbackQuery):
@@ -2143,7 +2201,7 @@ async def callback_load_price_n(callback: CallbackQuery):
     await load_items_with_limit(callback, limit, fetch_type='price')
 
 async def heartbeat_loop():
-    global is_master, last_heartbeat_time, is_stopped
+    global is_master, last_heartbeat_time, is_stopped, active_devices
     
     # Получаем HWID для этого устройства
     try:
@@ -2153,24 +2211,22 @@ async def heartbeat_loop():
     
     while not is_stopped:
         try:
-            # Отправляем статус устройства админу
-            try:
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"📡 Device heartbeat: `{hwid}`\nInstance ID: `{INSTANCE_ID}`\nRole: {'MASTER' if is_master else 'SLAVE'}",
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_notification=True
-                )
-            except:
-                pass
+            # Обновляем статус этого устройства
+            active_devices[hwid] = time.time()
+            
+            # Очищаем устройства которые не ответили больше 10 минут
+            current_time = time.time()
+            for hwid_key in list(active_devices.keys()):
+                if current_time - active_devices[hwid_key] > 600:
+                    del active_devices[hwid_key]
             
             # Проверяем последние сообщения в чате
-            messages = await bot.get_chat_history(settings['chat_id'], limit=20)
+            messages = await bot.get_chat_history(settings['chat_id'], limit=30)
             
             current_time = time.time()
             last_master_heartbeat = 0
             
-            # Ищем последний heartbeat
+            # Ищем последний heartbeat и собираем активные устройства
             for msg in messages:
                 if msg.text and msg.text.startswith("❤️ HEARTBEAT"):
                     try:
@@ -2178,6 +2234,9 @@ async def heartbeat_loop():
                         msg_time = float(parts[2])
                         if msg_time > last_master_heartbeat:
                             last_master_heartbeat = msg_time
+                        # Добавляем устройство в активные если видели его меньше 10 минут назад
+                        if current_time - msg_time < 600 and len(parts) > 3:
+                            active_devices[parts[3]] = msg_time
                     except:
                         pass
                 if msg.text and msg.text == "🛑 STOP ALL":
@@ -2194,7 +2253,7 @@ async def heartbeat_loop():
                 # Мастер мертв - пытаемся стать новым мастером
                 await bot.send_message(
                     chat_id=settings['chat_id'],
-                    text=f"❤️ HEARTBEAT {current_time} {INSTANCE_ID}",
+                    text=f"❤️ HEARTBEAT {current_time} {INSTANCE_ID} {hwid}",
                     disable_notification=True
                 )
                 is_master = True
@@ -2229,33 +2288,53 @@ async def cmd_stop_all(message: Message):
     else:
         await message.answer("❌ Только администратор может использовать эту команду")
 
+@router.callback_query(lambda c: c.data == "devices")
+async def callback_devices(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
+    global active_devices
+    lines = ["📋 Активные устройства:"]
+    lines.append("")
+    
+    current_time = time.time()
+    active = []
+    
+    # Очищаем устройства которые не видели больше 10 минут
+    for hwid, last_seen in list(active_devices.items()):
+        if current_time - last_seen < 600:  # 10 минут
+            active.append(f"✅ `{hwid[-12:]}`")
+        else:
+            del active_devices[hwid]
+    
+    if not active:
+        lines.append("Нет активных устройств")
+    else:
+        lines.extend(active)
+        lines.append("")
+        lines.append(f"Всего активных: {len(active)}")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="devices")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await callback.answer()
+
 @router.message(Command("devices"))
 async def cmd_devices(message: Message):
-    if message.from_user.id == ADMIN_ID:
-        global active_devices
-        lines = ["📋 Активные устройства:"]
-        lines.append("")
-        
-        current_time = time.time()
-        active = []
-        
-        # Очищаем устройства которые не видели больше 10 минут
-        for hwid, last_seen in list(active_devices.items()):
-            if current_time - last_seen < 600:  # 10 минут
-                active.append(f"✅ `{hwid}`")
-            else:
-                del active_devices[hwid]
-        
-        if not active:
-            lines.append("Нет активных устройств")
-        else:
-            lines.extend(active)
-            lines.append("")
-            lines.append(f"Всего активных: {len(active)}")
-        
-        await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
-    else:
+    if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Только администратор может использовать эту команду")
+        return
+    
+    # Отправляем в админ панель
+    await callback_devices(message)
 
 async def main():
     global PROXIES, USE_PROXIES

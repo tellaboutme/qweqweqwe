@@ -1,4 +1,4 @@
-name: Build VintedBot EXE
+name: Build & Release VintedBot EXE
 
 on:
   push:
@@ -25,8 +25,16 @@ jobs:
       run: |
         pyinstaller --onefile --windowed --name=VintedBot --hidden-import=tkinter VintedBotPortable.py
         
-    - name: Upload EXE
-      uses: actions/upload-artifact@v4
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y.%m.%d-%H%M')" >> $GITHUB_OUTPUT
+        
+    - name: Create Release
+      uses: ncipollo/release-action@v1
       with:
-        name: VintedBot.exe
-        path: dist/VintedBot.exe
+        tag: v${{ steps.date.outputs.date }}
+        name: VintedBot ${{ steps.date.outputs.date }}
+        artifacts: dist/VintedBot.exe
+        allowUpdates: true
+        generateReleaseNotes: true
+        token: ${{ secrets.GITHUB_TOKEN }}
