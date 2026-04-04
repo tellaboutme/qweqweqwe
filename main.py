@@ -48,8 +48,9 @@ from config import (
 )
 
 if not BOT_TOKEN or not CHAT_ID:
-    print("❌ BOT_TOKEN or CHAT_ID environment variables not set!")
-    print("💡 Create .env file with BOT_TOKEN and CHAT_ID values")
+    print(f"❌ BOT_TOKEN or CHAT_ID environment variables not set!")
+    print(f"💡 Set BOT_TOKEN and CHAT_ID in Render environment variables")
+    print(f"DEBUG: BOT_TOKEN exists: {bool(BOT_TOKEN)}, CHAT_ID exists: {bool(CHAT_ID)}")
     sys.exit(1)
 
 bot = Bot(token=BOT_TOKEN)
