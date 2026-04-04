@@ -152,8 +152,58 @@ def show_error(message):
     except:
         pass
 
+def get_latest_release():
+    try:
+        r = requests.get("https://api.github.com/repos/tellaboutme/qweqweqwe/releases/latest", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data['tag_name'], data['assets'][0]['browser_download_url']
+    except:
+        return None, None
+
+def check_for_updates():
+    try:
+        current_version = "1.0.0"
+        latest_version, download_url = get_latest_release()
+        
+        if not latest_version:
+            return
+        
+        if latest_version != current_version:
+            # Скачиваем новую версию
+            r = requests.get(download_url, timeout=60)
+            r.raise_for_status()
+            
+            # Сохраняем новый exe
+            new_exe = os.path.join(tempfile.gettempdir(), "VintedBot_new.exe")
+            with open(new_exe, 'wb') as f:
+                f.write(r.content)
+            
+            # Заменяем текущий exe при следующем запуске
+            current_exe = sys.executable
+            bat_path = os.path.join(tempfile.gettempdir(), "update.bat")
+            
+            with open(bat_path, 'w') as f:
+                f.write(f"""
+@echo off
+timeout /t 1 /nobreak > nul
+del "{current_exe}"
+move "{new_exe}" "{current_exe}"
+start "" "{current_exe}"
+del "%~f0"
+                """)
+            
+            subprocess.Popen([bat_path], creationflags=0x08000000)
+            sys.exit(0)
+    except:
+        pass
+
 def main():
     try:
+        # ✅ Автоапдейт перед запуском
+        if getattr(sys, 'frozen', False):
+            check_for_updates()
+        
         if getattr(sys, 'frozen', False):
             os.chdir(os.path.dirname(sys.executable))
         
@@ -161,9 +211,6 @@ def main():
         if not config:
             import tkinter as tk
             
-            # ✅ САМОЕ ПРОСТОЕ И 100% РАБОЧЕЕ РЕШЕНИЕ
-            # В PyInstaller --windowed режиме Tkinter имеет баг с буфером обмена
-            # Единственный способ который работает всегда - кнопки "Вставить"
             root = tk.Tk()
             root.title("Vinted Bot Setup")
             root.geometry("450x260")
@@ -171,6 +218,8 @@ def main():
             root.attributes("-topmost", True)
             root.lift()
             root.focus_force()
+            
+            # Центрируем окно
             root.eval('tk::PlaceWindow . center')
             
             # Token field
