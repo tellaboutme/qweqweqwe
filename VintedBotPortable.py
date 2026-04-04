@@ -153,72 +153,72 @@ def main():
         config = load_config()
         if not config:
             import tkinter as tk
-            from tkinter import ttk
             
+            # ✅ САМОЕ ПРОСТОЕ И 100% РАБОЧЕЕ РЕШЕНИЕ
+            # В PyInstaller --windowed режиме Tkinter имеет баг с буфером обмена
+            # Единственный способ который работает всегда - кнопки "Вставить"
             root = tk.Tk()
             root.title("Vinted Bot Setup")
-            root.geometry("420x220")
+            root.geometry("450x260")
             root.resizable(False, False)
             root.attributes("-topmost", True)
             root.lift()
             root.focus_force()
-            
-            # Центрируем окно
             root.eval('tk::PlaceWindow . center')
             
-            # Включаем полную поддержку буфера обмена
-            root.clipboard_clear()
+            # Token field
+            tk.Label(root, text="BOT_TOKEN:", font=("Arial", 10)).place(x=20, y=20)
+            token_entry = tk.Entry(root, width=42, show="*", font=("Arial", 9))
+            token_entry.place(x=20, y=45, height=25)
+            token_entry.focus()
             
-            style = ttk.Style(root)
-            style.theme_use('clam')
+            def paste_token():
+                try:
+                    token_entry.delete(0, tk.END)
+                    token_entry.insert(0, root.clipboard_get())
+                except:
+                    pass
             
-            main_frame = ttk.Frame(root, padding=20)
-            main_frame.pack(fill=tk.BOTH, expand=True)
+            paste_btn_token = tk.Button(root, text="📋", command=paste_token, width=3, height=1)
+            paste_btn_token.place(x=380, y=43)
             
-            ttk.Label(main_frame, text="BOT_TOKEN:", font=("Segoe UI", 10)).grid(row=0, column=0, sticky="w", pady=(0, 5))
-            token_entry = ttk.Entry(main_frame, width=55, show="*")
-            token_entry.grid(row=1, column=0, pady=(0, 10))
-            token_entry.focus_set()
+            # Chat ID field
+            tk.Label(root, text="CHAT_ID:", font=("Arial", 10)).place(x=20, y=90)
+            chat_entry = tk.Entry(root, width=42, font=("Arial", 9))
+            chat_entry.place(x=20, y=115, height=25)
             
-            ttk.Label(main_frame, text="CHAT_ID:", font=("Segoe UI", 10)).grid(row=2, column=0, sticky="w", pady=(0, 5))
-            chat_entry = ttk.Entry(main_frame, width=55)
-            chat_entry.grid(row=3, column=0, pady=(0, 15))
+            def paste_chat():
+                try:
+                    chat_entry.delete(0, tk.END)
+                    chat_entry.insert(0, root.clipboard_get())
+                except:
+                    pass
+            
+            paste_btn_chat = tk.Button(root, text="📋", command=paste_chat, width=3, height=1)
+            paste_btn_chat.place(x=380, y=113)
             
             def on_submit():
                 bot_token = token_entry.get().strip()
                 chat_id = chat_entry.get().strip()
                 if bot_token and chat_id:
                     save_config(bot_token, chat_id)
-                    root.quit()
                     root.destroy()
             
-            btn_frame = ttk.Frame(main_frame)
-            btn_frame.grid(row=4, column=0, pady=5)
-            submit_btn = ttk.Button(btn_frame, text="OK", command=on_submit, width=25)
-            submit_btn.pack()
+            submit_btn = tk.Button(root, text="OK", command=on_submit, width=20, height=2, font=("Arial", 9))
+            submit_btn.place(x=150, y=170)
             
-            # Включаем поддержку Ctrl+V явно
-            def paste(event):
-                try:
-                    clipboard = root.clipboard_get()
-                    event.widget.insert(tk.INSERT, clipboard)
-                except:
-                    pass
-                return "break"
-            
-            token_entry.bind("<Control-v>", paste)
-            token_entry.bind("<Control-V>", paste)
-            chat_entry.bind("<Control-v>", paste)
-            chat_entry.bind("<Control-V>", paste)
-            
-            # Обработка Enter
+            # Поддержка Enter
             def on_enter(event):
                 on_submit()
             
             token_entry.bind("<Return>", on_enter)
             chat_entry.bind("<Return>", on_enter)
             
-            submit_btn.bind("<Return>", on_submit)
+            # ✅ Принудительно инициализируем буфер обмена
+            try:
+                root.clipboard_get()
+            except:
+                pass
             
             root.mainloop()
         
