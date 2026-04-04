@@ -69,6 +69,15 @@ monitoring_task: Optional[asyncio.Task] = None
 user_monitoring_tasks: Dict[int, asyncio.Task] = {}
 user_processed_items: Dict[int, set] = {}
 
+# ============= GLOBAL LOCK FOR MULTIPLE INSTANCES =============
+INSTANCE_ID = random.randint(100000, 999999)
+is_master = False
+last_heartbeat_time = 0
+HEARTBEAT_INTERVAL = 30
+MASTER_TIMEOUT = 90
+is_stopped = False
+# ============= END GLOBAL LOCK =============
+
 async def user_monitoring_loop(user_id: int):
     """Separate monitoring loop for individual user"""
     user_data = load_user_data(user_id)
@@ -2119,10 +2128,75 @@ async def callback_load_price_n(callback: CallbackQuery):
     limit = mapping.get(callback.data, 10)
     await load_items_with_limit(callback, limit, fetch_type='price')
 
+async def heartbeat_loop():
+    global is_master, last_heartbeat_time, is_stopped
+    
+    while not is_stopped:
+        try:
+            # Проверяем последние сообщения в чате
+            messages = await bot.get_chat_history(settings['chat_id'], limit=20)
+            
+            current_time = time.time()
+            last_master_heartbeat = 0
+            
+            # Ищем последний heartbeat
+            for msg in messages:
+                if msg.text and msg.text.startswith("❤️ HEARTBEAT"):
+                    try:
+                        parts = msg.text.split()
+                        msg_time = float(parts[2])
+                        if msg_time > last_master_heartbeat:
+                            last_master_heartbeat = msg_time
+                    except:
+                        pass
+                if msg.text and msg.text == "🛑 STOP ALL":
+                    print("🛑 Получена команда глобальной остановки!")
+                    is_stopped = True
+                    stop_monitoring()
+                    await bot.session.close()
+                    sys.exit(0)
+            
+            # Проверяем жив ли мастер
+            master_alive = (current_time - last_master_heartbeat) < MASTER_TIMEOUT
+            
+            if not master_alive:
+                # Мастер мертв - пытаемся стать новым мастером
+                await bot.send_message(
+                    chat_id=settings['chat_id'],
+                    text=f"❤️ HEARTBEAT {current_time} {INSTANCE_ID}",
+                    disable_notification=True
+                )
+                is_master = True
+                if not is_monitoring:
+                    start_monitoring()
+                    print(f"✅ Стал мастером. Запускаю мониторинг. Instance ID: {INSTANCE_ID}")
+            else:
+                # Мастер жив - мы слейв
+                if is_master:
+                    is_master = False
+                    stop_monitoring()
+                    print(f"ℹ️ Перешел в режим слейва. Instance ID: {INSTANCE_ID}")
+            
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            
+        except Exception as e:
+            print(f"⚠️ Heartbeat error: {str(e)[:50]}")
+            await asyncio.sleep(10)
+
+@router.message(Command("stopall"))
+async def cmd_stop_all(message: Message):
+    if message.chat.id == settings['chat_id']:
+        await message.answer("🛑 Отправляю команду остановки всем экземплярам бота!")
+        await bot.send_message(chat_id=settings['chat_id'], text="🛑 STOP ALL")
+        is_stopped = True
+        stop_monitoring()
+        await bot.session.close()
+        sys.exit(0)
+
 async def main():
     global PROXIES, USE_PROXIES
     load_settings()
-    print("Bot started! Loading settings...")
+    print(f"Bot started! Instance ID: {INSTANCE_ID}")
     print(f"Keywords: {settings['keywords']}")
     print(f"Interval: {settings['check_interval']}s ({settings['check_interval']//60} min)")
     print(f"Chat ID: {settings['chat_id']}")
@@ -2131,9 +2205,8 @@ async def main():
     print(f"Proxies enabled: {USE_PROXIES}")
     print(f"Loaded proxies: {len(PROXIES) if PROXIES else 0}")
     
-    # ✅ Автоматический запуск мониторинга при старте бота
-    start_monitoring()
-    print("✅ Мониторинг запущен автоматически")
+    # Запускаем цикл проверки мастерства
+    asyncio.create_task(heartbeat_loop())
     
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
