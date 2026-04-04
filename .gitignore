@@ -1,0 +1,28 @@
+# Dependencies and virtual environments
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+
+# Logs and runtime files
+*.log
+UPDATES.txt
+monitoring_test_results.txt
+hashtag_stats.json
+processed_items.json
+seen_items.json
+last_seen_id.json
+settings.json
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# User data
+users/
