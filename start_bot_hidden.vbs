@@ -8,4 +8,4 @@ botDir = CreateObject("Scripting.FileSystemObject").GetParentFolderName(WScript.
 WshShell.CurrentDirectory = botDir
 WshShell.Run "pythonw.exe main.py", 0, False
 
-MsgBox "✅ Бот добавлен в автозапуск и запущен в фоне!", vbInformation, "Vinted Bot"
+MsgBox "Bot started", vbInformation, "Vinted Bot"
