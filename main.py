@@ -2131,6 +2131,10 @@ async def main():
     print(f"Proxies enabled: {USE_PROXIES}")
     print(f"Loaded proxies: {len(PROXIES) if PROXIES else 0}")
     
+    # ✅ Автоматический запуск мониторинга при старте бота
+    start_monitoring()
+    print("✅ Мониторинг запущен автоматически")
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
 
