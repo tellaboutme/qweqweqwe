@@ -2599,7 +2599,8 @@ async def heartbeat_loop():
                 if current_time - active_devices[hwid_key] > 600:
                     del active_devices[hwid_key]
             
-            messages = await bot.get_chat_history(settings['chat_id'], limit=50)
+            history = await bot.get_chat_history_messages(chat_id=settings['chat_id'], limit=50)
+            messages = history.messages
             
             last_master_heartbeat = 0
             
