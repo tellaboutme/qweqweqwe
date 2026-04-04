@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import json
 import os
@@ -6,6 +7,15 @@ import re
 import signal
 import sys
 import time
+
+# Fix Unicode encoding
+os.environ['PYTHONIOENCODING'] = 'utf-8'
+os.environ['PYTHONLEGACYWINDOWSSTDIO'] = 'utf-8'
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -48,8 +58,8 @@ from config import (
 )
 
 if not BOT_TOKEN or not CHAT_ID:
-    print(f"❌ BOT_TOKEN or CHAT_ID environment variables not set!")
-    print(f"💡 Set BOT_TOKEN and CHAT_ID in Render environment variables")
+    print(f"BOT_TOKEN or CHAT_ID environment variables not set!")
+    print(f"Set BOT_TOKEN and CHAT_ID in .env file")
     print(f"DEBUG: BOT_TOKEN exists: {bool(BOT_TOKEN)}, CHAT_ID exists: {bool(CHAT_ID)}")
     sys.exit(1)
 
@@ -2196,7 +2206,25 @@ async def cmd_stop_all(message: Message):
 async def main():
     global PROXIES, USE_PROXIES
     load_settings()
+    
+    # ✅ Отладка: Получаем HWID компьютера
+    try:
+        hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+    except:
+        hwid = f"unknown-{random.randint(100000, 999999)}"
+    
+    # Отправляем отладочную информацию в телеграм
+    try:
+        await bot.send_message(
+            chat_id=settings['chat_id'],
+            text=f"🤖 Бот запущен\n\n📋 Информация о системе:\nHWID: `{hwid}`\nInstance ID: `{INSTANCE_ID}`\n\n✅ Бот готов к работе.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        print(f"Не удалось отправить отладку: {e}")
+    
     print(f"Bot started! Instance ID: {INSTANCE_ID}")
+    print(f"HWID: {hwid}")
     print(f"Keywords: {settings['keywords']}")
     print(f"Interval: {settings['check_interval']}s ({settings['check_interval']//60} min)")
     print(f"Chat ID: {settings['chat_id']}")
