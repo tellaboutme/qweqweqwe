@@ -25,7 +25,7 @@ def get_latest_version():
             
             # Extract all files except launcher itself
             for file in z.namelist():
-                if not file.endswith('/') and not file.endswith('VintedBotLauncher.py'):
+                if not file.endswith('/') and not file.endswith('VintedBotLauncher.py') and not file.endswith('vintedbotlauncher.py'):
                     filename = file[len(root_folder)+1:]
                     if filename:
                         try:

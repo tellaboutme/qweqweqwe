@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import ctypes
 import json
 import os
 import random
@@ -15,6 +16,12 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8')
+
+# Set process window title to vintedbot for easy identification
+try:
+    ctypes.windll.kernel32.SetConsoleTitleW("vintedbot")
+except:
+    pass
 
 from typing import Dict, List, Optional, Tuple
 
@@ -73,6 +80,9 @@ class SettingsState(StatesGroup):
     waiting_for_interval = State()
     waiting_for_monitoring_url = State()
     removing_monitoring_url = State()
+    waiting_for_collection_name = State()
+    waiting_for_collection_keywords = State()
+    selecting_collection_for_search = State()
 
 is_monitoring = False
 monitoring_task: Optional[asyncio.Task] = None
@@ -159,6 +169,10 @@ settings: Dict = {
     'check_interval': CHECK_INTERVAL,
     'chat_id': CHAT_ID,
     'valid_chat_id': False,
+    'keyword_collections': {
+        'default': KEYWORDS.copy()
+    },
+    'active_collection': 'default',
 }
 
 items_cache: Dict = {
@@ -275,7 +289,12 @@ def load_settings():
     
     if os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, 'r') as f:
-            settings.update(json.load(f))
+            loaded = json.load(f)
+            settings.update(loaded)
+            if 'keyword_collections' not in settings:
+                settings['keyword_collections'] = {'default': settings['keywords'].copy()}
+                settings['active_collection'] = 'default'
+                save_settings()
     load_hashtag_stats()
 
 def save_settings():
@@ -839,10 +858,10 @@ def create_items_keyboard(page_items: List[Tuple], page: int, max_pages: int, sh
         keyboard.append(control_buttons)
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-async def check_new_items(keyword: str) -> List[tuple]:
+async def check_new_items(keywords: List[str]) -> List[tuple]:
     new_items = []
     try:
-        items = await get_last_items_list(keyword, limit=25)
+        items = await get_last_items_list(keywords, limit=25)
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
             detail_tasks = [get_item_details(item[2], session=session) for item in items]
             detail_results = await asyncio.gather(*detail_tasks, return_exceptions=True)
@@ -854,7 +873,7 @@ async def check_new_items(keyword: str) -> List[tuple]:
                 new_items.append((item_id, full_title, item_url, price))
         return new_items
     except Exception as e:
-        print(f"Error checking items for {keyword}: {e}")
+        print(f"Error checking items: {e}")
         return []
 
 async def send_notification(item_url: str, title: str, price: str):
@@ -1313,24 +1332,26 @@ async def _fetch_search_html(session: aiohttp.ClientSession, domain: str, keywor
     
     raise Exception(f"Failed to fetch {domain} after {max_attempts} attempts")
 
-async def get_items_by_price(keyword: str, limit: int = 10, progress_callback=None) -> List[Tuple[int, str, str, str, str, str, str, str]]:
-    print(f"Fetching {limit} cheapest items from page only (no internal requests)")
-    all_items = {}  # item_id -> (title, item_url, price, image_url, size, condition, shipping)
-    keyword_lower = keyword.lower()
+async def get_items_by_price(keywords: List[str], limit: int = 10, progress_callback=None) -> List[Tuple[int, str, str, str, str, str, str, str]]:
+    print(f"Fetching {limit} cheapest items with keywords: {keywords}")
+    all_items = {}
+    search_keyword = keywords[0] if keywords else ''
 
     async def report_progress(stage: str, step: int, total: int, extra_info: str = "", found_count: int = 0):
         if progress_callback:
             msg = format_progress(stage, step, total, extra_info, found_count)
             await progress_callback(msg)
 
+    def matches_keywords(text: str) -> bool:
+        text_lower = text.lower()
+        return any(kw.lower() in text_lower for kw in keywords)
+
     try:
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-            # Fetch only one search page per domain
-            tasks = [_fetch_search_html(session, domain, keyword) for domain in VINTED_DOMAINS]
+            tasks = [_fetch_search_html(session, domain, search_keyword) for domain in VINTED_DOMAINS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             domain_count = len(VINTED_DOMAINS)
 
-            # First pass: collect all items
             for idx, result in enumerate(results):
                 if isinstance(result, Exception):
                     print(f"Error fetching domain {VINTED_DOMAINS[idx]}: {result}")
@@ -1340,13 +1361,11 @@ async def get_items_by_price(keyword: str, limit: int = 10, progress_callback=No
                 soup = BeautifulSoup(html, 'html.parser')
                 raw_items = soup.select('a[href*="/items/"]')[:limit+20]
                 total_cards = len(raw_items)
-                # Apply seller block filtering
                 raw_items = [item for item in raw_items if is_valid_product_card(item)]
                 print(f"✅ Found {len(raw_items)} valid product cards from {total_cards} on {domain}")
 
                 await report_progress("Collecting items", idx + 1, domain_count, f"Found {len(raw_items)} valid items", len(raw_items))
 
-                # Parse items and update progress
                 for i, item in enumerate(raw_items):
                     href = item.get('href', '')
                     if not href:
@@ -1354,7 +1373,6 @@ async def get_items_by_price(keyword: str, limit: int = 10, progress_callback=No
                     item_url = f"https://{domain}{href}" if href.startswith('/') else href
                     item_url = item_url.split('?')[0]
 
-                    # Extract item ID
                     item_id_match = re.search(r'/items/(\d+)', item_url)
                     if not item_id_match:
                         continue
@@ -1363,8 +1381,9 @@ async def get_items_by_price(keyword: str, limit: int = 10, progress_callback=No
                     if item_id in all_items:
                         continue
 
-                    # Parse ALL data DIRECTLY from page HTML (NO additional requests)
                     title_attr = item.get('title', '')
+                    if title_attr and not matches_keywords(title_attr):
+                        continue
                     if title_attr:
                         # Name
                         title = title_attr.split(',')[0].strip() if ',' in title_attr else title_attr.strip()
@@ -1436,24 +1455,26 @@ async def get_items_by_price(keyword: str, limit: int = 10, progress_callback=No
         print(f"Error fetching items overall: {e}")
         return []
 
-async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=None) -> List[Tuple[int, str, str, str, str, str, str, str]]:
-    print(f"Fetching last {limit} items from page only (no internal requests)")
-    all_items = {}  # item_id -> (title, item_url, price, image_url, size, condition, shipping)
-    keyword_lower = keyword.lower()
+async def get_last_items_list(keywords: List[str], limit: int = 10, progress_callback=None) -> List[Tuple[int, str, str, str, str, str, str, str]]:
+    print(f"Fetching last {limit} items with keywords: {keywords}")
+    all_items = {}
+    search_keyword = keywords[0] if keywords else ''
 
     async def report_progress(stage: str, step: int, total: int, extra_info: str = "", found_count: int = 0):
         if progress_callback:
             msg = format_progress(stage, step, total, extra_info, found_count)
             await progress_callback(msg)
 
+    def matches_keywords(text: str) -> bool:
+        text_lower = text.lower()
+        return any(kw.lower() in text_lower for kw in keywords)
+
     try:
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-            # Fetch only one search page per domain
-            tasks = [_fetch_search_html(session, domain, keyword) for domain in VINTED_DOMAINS]
+            tasks = [_fetch_search_html(session, domain, search_keyword) for domain in VINTED_DOMAINS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             domain_count = len(VINTED_DOMAINS)
 
-            # First pass: collect all items
             for idx, result in enumerate(results):
                 if isinstance(result, Exception):
                     print(f"Error fetching domain {VINTED_DOMAINS[idx]}: {result}")
@@ -1463,13 +1484,11 @@ async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=N
                 soup = BeautifulSoup(html, 'html.parser')
                 raw_items = soup.select('a[href*="/items/"]')[:limit+20]
                 total_cards = len(raw_items)
-                # Apply seller block filtering
                 raw_items = [item for item in raw_items if is_valid_product_card(item)]
                 print(f"✅ Found {len(raw_items)} valid product cards from {total_cards} on {domain}")
 
                 await report_progress("Collecting items", idx + 1, domain_count, f"Found {len(raw_items)} valid items", len(raw_items))
 
-                # Parse items and update progress
                 for i, item in enumerate(raw_items):
                     href = item.get('href', '')
                     if not href:
@@ -1477,7 +1496,6 @@ async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=N
                     item_url = f"https://{domain}{href}" if href.startswith('/') else href
                     item_url = item_url.split('?')[0]
 
-                    # Extract item ID
                     item_id_match = re.search(r'/items/(\d+)', item_url)
                     if not item_id_match:
                         continue
@@ -1486,18 +1504,15 @@ async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=N
                     if item_id in all_items:
                         continue
 
-                    # Parse ALL data DIRECTLY from page HTML (NO additional requests)
                     title_attr = item.get('title', '')
+                    if title_attr and not matches_keywords(title_attr):
+                        continue
                     if title_attr:
-                        # Name
                         title = title_attr.split(',')[0].strip() if ',' in title_attr else title_attr.strip()
-                        # Size: taglia: 42 (Italy) or rozmiar: 42 (Poland)
                         size_match = re.search(r'taglia:\s*([^,]+)', title_attr) or re.search(r'rozmiar:\s*([^,]+)', title_attr)
                         size = size_match.group(1).strip() if size_match else ''
-                        # Condition: condizioni: Ottime (Italy) or stan: Dobry (Poland)
                         cond_match = re.search(r'condizioni:\s*([^,]+)', title_attr) or re.search(r'stan:\s*([^,]+)', title_attr)
                         condition = cond_match.group(1).strip() if cond_match else ''
-                        # Price and shipping
                         price_match = re.search(r'€\s*([\d,.]+)', title_attr)
                         if price_match:
                             price = f"€{price_match.group(1)}"
@@ -1526,7 +1541,6 @@ async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=N
                         condition = ''
                         shipping = ''
 
-                    # Get image URL from parent elements
                     image_url = ''
                     parent = item.parent
                     depth = 0
@@ -1539,15 +1553,12 @@ async def get_last_items_list(keyword: str, limit: int = 10, progress_callback=N
                         parent = parent.parent
                         depth += 1
 
-                    # Add to results
                     all_items[item_id] = (title, item_url, price, image_url, size, condition, shipping)
                     
-                    # Update progress bar
                     total_items = len(raw_items)
                     percent = int((i + 1) / total_items * 100)
                     await report_progress("Parsing items", i + 1, total_items, f"{percent}% completed", len(all_items))
 
-            # Sort by item_id (newest first) and take limit
             await report_progress("Finalizing", 100, 100, "Sorting results", len(all_items))
             sorted_items = sorted(all_items.items(), key=lambda x: x[0], reverse=True)[:limit]
             final_results = [(item_id, title, item_url, price, image_url, size, condition, shipping) for item_id, (title, item_url, price, image_url, size, condition, shipping) in sorted_items]
@@ -1570,16 +1581,26 @@ async def cmd_start(message: Message):
         await message.answer(f"✅ Chat ID автоматически сохранен: {user_chat_id}")
     
     proxy_status = "ON" if USE_PROXIES else "OFF"
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active_col = settings.get('active_collection', 'default')
+    active_kw = collections.get(active_col, settings['keywords'])
+    
+    welcome_text = (
+        "✨ <b>VintedBot</b> ✨\n\n"
+        "🔎 <i>Smart Vinted item finder & monitor</i>\n\n"
+        f"📁 <b>Collection:</b> {active_col} ({len(active_kw)} keywords)\n"
+        f"🌐 <b>Proxy:</b> {proxy_status}\n"
+        f"📡 <b>Monitoring:</b> {'✅ Active' if is_monitoring else '❌ Inactive'}\n"
+        f"⏱️ <b>Interval:</b> {settings['check_interval']}s"
+    )
     
     base_buttons = [
-        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings")],
-        [InlineKeyboardButton(text="📦 Load Latest Items", callback_data="load_latest")],
-        [InlineKeyboardButton(text="🌐 Proxy (ON)" if USE_PROXIES else "🌐 Proxy (OFF)", callback_data="proxy_menu")],
-        [InlineKeyboardButton(text="🔍 Monitoring URLs", callback_data="monitoring_menu")],
+        [InlineKeyboardButton(text="📦 Load Items", callback_data="load_latest")],
+        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"), InlineKeyboardButton(text="🌐 Proxy", callback_data="proxy_menu")],
+        [InlineKeyboardButton(text="🔍 Monitor URLs", callback_data="monitoring_menu")],
         [InlineKeyboardButton(text="▶️ Start Monitoring" if not is_monitoring else "⏹️ Stop Monitoring", callback_data="toggle_monitoring")],
     ]
     
-    # Добавляем админ панель только для админа
     if message.from_user.id == ADMIN_ID:
         admin_buttons = [
             [InlineKeyboardButton(text="👑 Admin Panel", callback_data="admin_panel")],
@@ -1589,7 +1610,7 @@ async def cmd_start(message: Message):
         keyboard = InlineKeyboardMarkup(inline_keyboard=base_buttons)
     
     await message.answer(
-        "🤖 <b>Vinted Swear Bot</b>\n\nChoose an option:",
+        welcome_text,
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -1607,14 +1628,66 @@ async def callback_admin_panel(callback: CallbackQuery):
             active_count += 1
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📋 Active Devices ({active_count})", callback_data="devices")],
-        [InlineKeyboardButton(text="🛑 Stop All Bots", callback_data="stopall")],
-        [InlineKeyboardButton(text="🔄 Restart All Bots", callback_data="restartall")],
+        [InlineKeyboardButton(text=f"🖥️ Sessions ({active_count})", callback_data="devices")],
+        [InlineKeyboardButton(text="🛑 Stop All", callback_data="stopall")],
+        [InlineKeyboardButton(text="🔄 Restart All", callback_data="restartall")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
     
     await callback.message.edit_text(
-        "👑 <b>Admin Panel</b>\n\nТолько для администратора",
+        "👑 <b>Admin Panel</b>\n\n"
+        "🔒 <i>Restricted access</i>\n\n"
+        f"🖥️ <b>Active sessions:</b> {active_count}\n"
+        f"🆔 <b>This instance:</b> {INSTANCE_ID}",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+    
+    base_buttons = [
+        [InlineKeyboardButton(text="📦 Load Items", callback_data="load_latest")],
+        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"), InlineKeyboardButton(text="🌐 Proxy", callback_data="proxy_menu")],
+        [InlineKeyboardButton(text="🔍 Monitor URLs", callback_data="monitoring_menu")],
+        [InlineKeyboardButton(text="▶️ Start Monitoring" if not is_monitoring else "⏹️ Stop Monitoring", callback_data="toggle_monitoring")],
+    ]
+    
+    if message.from_user.id == ADMIN_ID:
+        admin_buttons = [
+            [InlineKeyboardButton(text="👑 Admin Panel", callback_data="admin_panel")],
+        ]
+        keyboard = InlineKeyboardMarkup(inline_keyboard=base_buttons + admin_buttons)
+    else:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=base_buttons)
+    
+    await message.answer(
+        welcome_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "admin_panel")
+async def callback_admin_panel(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
+    current_time = time.time()
+    active_count = 0
+    for hwid, last_seen in active_devices.items():
+        if current_time - last_seen < 600:
+            active_count += 1
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🖥️ Sessions ({active_count})", callback_data="devices")],
+        [InlineKeyboardButton(text="🛑 Stop All", callback_data="stopall")],
+        [InlineKeyboardButton(text="🔄 Restart All", callback_data="restartall")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
+    ])
+    
+    await callback.message.edit_text(
+        "👑 <b>Admin Panel</b>\n\n"
+        "🔒 <i>Restricted access</i>\n\n"
+        f"🖥️ <b>Active sessions:</b> {active_count}\n"
+        f"🆔 <b>This instance:</b> {INSTANCE_ID}",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -1646,26 +1719,42 @@ async def callback_toggle_monitoring(callback: CallbackQuery):
     global is_monitoring
     if is_monitoring:
         stop_monitoring()
-        await callback.answer("⏹️ Monitoring stopped")
+        status_text = "⏹️ <b>Monitoring Stopped</b>"
+        status_emoji = "🔴"
     else:
         start_monitoring()
-        await callback.answer("▶️ Monitoring started")
+        status_text = "▶️ <b>Monitoring Started</b>"
+        status_emoji = "🟢"
+    
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active_col = settings.get('active_collection', 'default')
+    active_kw = collections.get(active_col, settings['keywords'])
+    
+    welcome_text = (
+        f"{status_text}\n\n"
+        f"📁 <b>Collection:</b> {active_col} ({len(active_kw)} kw)\n"
+        f"🌐 <b>Proxy:</b> {'ON' if USE_PROXIES else 'OFF'}\n"
+        f"📡 <b>Monitoring:</b> {'✅ Active' if is_monitoring else '❌ Inactive'}\n"
+        f"⏱️ <b>Interval:</b> {settings['check_interval']}s"
+    )
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings")],
-        [InlineKeyboardButton(text="📦 Load Latest Items", callback_data="load_latest")],
-        [InlineKeyboardButton(text="🌐 Proxy (ON)" if USE_PROXIES else "🌐 Proxy (OFF)", callback_data="proxy_menu")],
-        [InlineKeyboardButton(text="🔍 Monitoring URLs", callback_data="monitoring_menu")],
+        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"), InlineKeyboardButton(text="🌐 Proxy", callback_data="proxy_menu")],
+        [InlineKeyboardButton(text="📦 Load Items", callback_data="load_latest")],
+        [InlineKeyboardButton(text="🔍 Monitor URLs", callback_data="monitoring_menu")],
         [InlineKeyboardButton(text="▶️ Start Monitoring" if not is_monitoring else "⏹️ Stop Monitoring", callback_data="toggle_monitoring")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
+    
     await callback.message.edit_text(
-        "🤖 <b>Vinted Swear Bot</b>\n\nChoose an option:",
+        welcome_text,
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
 
 @router.callback_query(lambda c: c.data == "monitoring_menu")
 async def callback_monitoring_menu(callback: CallbackQuery):
-    urls_text = "\n".join([f"{i+1}. {url[:70]}..." for i, url in enumerate(MONITORING_URLS)])
+    urls_text = "\n".join([f"🔗 <code>{url[:60]}...</code>" for i, url in enumerate(MONITORING_URLS)]) if MONITORING_URLS else "⚠️ No URLs configured"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 List URLs", callback_data="list_monitoring_urls")],
         [InlineKeyboardButton(text="➕ Add URL", callback_data="add_monitoring_url")],
@@ -1673,7 +1762,41 @@ async def callback_monitoring_menu(callback: CallbackQuery):
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
     await callback.message.edit_text(
-        f"🔍 <b>Monitoring URLs</b>\n\nActive URLs ({len(MONITORING_URLS)}):\n{urls_text}",
+        f"🔍 <b>Monitoring URLs</b>\n\n"
+        f"📊 <b>Total:</b> {len(MONITORING_URLS)}\n\n"
+        f"{urls_text}",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Settings", callback_data="settings"), InlineKeyboardButton(text="🌐 Proxy", callback_data="proxy_menu")],
+        [InlineKeyboardButton(text="📦 Load Items", callback_data="load_latest")],
+        [InlineKeyboardButton(text="🔍 Monitor URLs", callback_data="monitoring_menu")],
+        [InlineKeyboardButton(text="▶️ Start Monitoring" if not is_monitoring else "⏹️ Stop Monitoring", callback_data="toggle_monitoring")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
+    ])
+    
+    await callback.message.edit_text(
+        welcome_text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "monitoring_menu")
+async def callback_monitoring_menu(callback: CallbackQuery):
+    urls_text = "\n".join([f"🔗 <code>{url[:60]}...</code>" for i, url in enumerate(MONITORING_URLS)]) if MONITORING_URLS else "⚠️ No URLs configured"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 List URLs", callback_data="list_monitoring_urls")],
+        [InlineKeyboardButton(text="➕ Add URL", callback_data="add_monitoring_url")],
+        [InlineKeyboardButton(text="🗑️ Remove URL", callback_data="remove_monitoring_url")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
+    ])
+    await callback.message.edit_text(
+        f"🔍 <b>Monitoring URLs</b>\n\n"
+        f"📊 <b>Total:</b> {len(MONITORING_URLS)}\n\n"
+        f"{urls_text}",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
@@ -1790,17 +1913,18 @@ async def callback_remove_monitoring_url(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "proxy_menu")
 async def callback_proxy_menu(callback: CallbackQuery):
+    proxy_count = len(PROXIES) if PROXIES else 0
+    status = "🟢 Active" if USE_PROXIES else "🔴 Inactive"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Enable Proxies" if not USE_PROXIES else "⏹️ Disable Proxies", callback_data="toggle_proxies")],
-        [InlineKeyboardButton(text="📝 Add Proxy", callback_data="add_proxy")],
-        [InlineKeyboardButton(text="🗑️ Remove Proxy", callback_data="remove_proxy")],
+        [InlineKeyboardButton(text="📝 Add Proxy", callback_data="add_proxy"), InlineKeyboardButton(text="🗑️ Remove Proxy", callback_data="remove_proxy")],
         [InlineKeyboardButton(text="📋 List Proxies", callback_data="list_proxies")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
-    proxy_count = len(PROXIES) if PROXIES else 0
-    status = "ON" if USE_PROXIES else "OFF"
     await callback.message.edit_text(
-        f"🌐 <b>Proxy Settings</b>\n\nStatus: {status}\nProxies loaded: {proxy_count}",
+        f"🌐 <b>Proxy Settings</b>\n\n"
+        f"📊 <b>Status:</b> {status}\n"
+        f"📦 <b>Loaded:</b> {proxy_count} proxies",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -1809,18 +1933,19 @@ async def callback_proxy_menu(callback: CallbackQuery):
 async def callback_toggle_proxies(callback: CallbackQuery):
     global USE_PROXIES
     USE_PROXIES = not USE_PROXIES
-    status = "ON" if USE_PROXIES else "OFF"
+    status = "🟢 ON" if USE_PROXIES else "🔴 OFF"
     await callback.answer(f"Proxies {status}")
+    proxy_count = len(PROXIES) if PROXIES else 0
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Enable Proxies" if not USE_PROXIES else "⏹️ Disable Proxies", callback_data="toggle_proxies")],
-        [InlineKeyboardButton(text="📝 Add Proxy", callback_data="add_proxy")],
-        [InlineKeyboardButton(text="🗑️ Remove Proxy", callback_data="remove_proxy")],
+        [InlineKeyboardButton(text="📝 Add Proxy", callback_data="add_proxy"), InlineKeyboardButton(text="🗑️ Remove Proxy", callback_data="remove_proxy")],
         [InlineKeyboardButton(text="📋 List Proxies", callback_data="list_proxies")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
-    proxy_count = len(PROXIES) if PROXIES else 0
     await callback.message.edit_text(
-        f"🌐 <b>Proxy Settings</b>\n\nStatus: {status}\nProxies loaded: {proxy_count}",
+        f"🌐 <b>Proxy Settings</b>\n\n"
+        f"📊 <b>Status:</b> {status}\n"
+        f"📦 <b>Loaded:</b> {proxy_count} proxies",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
@@ -1830,70 +1955,288 @@ async def callback_list_proxies(callback: CallbackQuery):
     if not PROXIES:
         await callback.answer("No proxies loaded!")
         return
-    proxy_list = "\n".join([f"{i+1}. {p}" for i, p in enumerate(PROXIES)])
-    await callback.message.answer(f"📋 <b>Loaded Proxies:</b>\n\n{proxy_list}", parse_mode=ParseMode.HTML)
+    proxy_list = "\n".join([f"🔸 <code>{p}</code>" for i, p in enumerate(PROXIES)])
+    await callback.message.answer(
+        f"📋 <b>Loaded Proxies ({len(PROXIES)})</b>\n\n{proxy_list}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Back", callback_data="proxy_menu")],
+        ]),
+        parse_mode=ParseMode.HTML
+    )
 
 @router.callback_query(lambda c: c.data == "settings")
 async def callback_settings(callback: CallbackQuery):
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active = settings.get('active_collection', 'default')
+    active_kw = collections.get(active, settings['keywords'])
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Keywords", callback_data="keywords")],
-        [InlineKeyboardButton(text="⏱️ Check Interval", callback_data="interval")],
+        [InlineKeyboardButton(text="📁 Collections", callback_data="collections_menu")],
+        [InlineKeyboardButton(text="⏱️ Interval", callback_data="interval")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
     ])
+    kw_summary = ', '.join(active_kw[:5]) + (f" ... (+{len(active_kw)-5})" if len(active_kw) > 5 else '') if active_kw else '(none)'
     await callback.message.edit_text(
-        "⚙️ <b>Settings</b>\n\nCurrent Keywords: " + ', '.join(settings['keywords']) + f"\nCurrent Interval: {settings['check_interval']}s ({settings['check_interval']//60} min)",
+        f"⚙️ <b>Settings</b>\n\n"
+        f"📁 <b>Active:</b> {active}\n"
+        f"🔑 <b>Keywords:</b> {kw_summary}\n"
+        f"⏱️ <b>Interval:</b> {settings['check_interval']}s ({settings['check_interval']//60} min)",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
+
+@router.callback_query(lambda c: c.data == "collections_menu")
+async def callback_collections_menu(callback: CallbackQuery):
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active = settings.get('active_collection', 'default')
+    keyboard_rows = []
+    for name, kws in collections.items():
+        status = " ✅" if name == active else ""
+        keyboard_rows.append([InlineKeyboardButton(text=f"📁 {name} ({len(kws)} kw){status}", callback_data=f"select_collection_{name}")])
+    keyboard_rows.append([InlineKeyboardButton(text="➕ Add Collection", callback_data="add_collection"), InlineKeyboardButton(text="🗑️ Remove", callback_data="remove_collection")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="settings")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    summary_lines = []
+    for name, kws in collections.items():
+        marker = " 👑" if name == active else ""
+        display_kw = ', '.join(kws[:3]) + (f" (+{len(kws)-3})" if len(kws) > 3 else '')
+        summary_lines.append(f"📁 <b>{name}</b>{marker}\n   🔑 {display_kw}")
+    await callback.message.edit_text(
+        "📁 <b>Keyword Collections</b>\n\n" + "\n".join(summary_lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "collections_menu")
+async def callback_collections_menu(callback: CallbackQuery):
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active = settings.get('active_collection', 'default')
+    keyboard_rows = []
+    for name, kws in collections.items():
+        status = " ✅" if name == active else ""
+        keyboard_rows.append([InlineKeyboardButton(text=f"📁 {name} ({len(kws)} kw){status}", callback_data=f"select_collection_{name}")])
+    keyboard_rows.append([InlineKeyboardButton(text="➕ Add Collection", callback_data="add_collection"), InlineKeyboardButton(text="🗑️ Remove", callback_data="remove_collection")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="settings")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    summary_lines = []
+    for name, kws in collections.items():
+        marker = " 👑" if name == active else ""
+        display_kw = ', '.join(kws[:3]) + (f" (+{len(kws)-3})" if len(kws) > 3 else '')
+        summary_lines.append(f"📁 <b>{name}</b>{marker}\n   🔑 {display_kw}")
+    await callback.message.edit_text(
+        "📁 <b>Keyword Collections</b>\n\n" + "\n".join(summary_lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data.startswith("select_collection_"))
+async def callback_select_collection(callback: CallbackQuery):
+    collection_name = callback.data[len("select_collection_"):]
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if collection_name in collections:
+        settings['active_collection'] = collection_name
+        settings['keywords'] = collections[collection_name].copy()
+        save_settings()
+        await callback.answer(f"✅ Active collection: {collection_name}")
+    await callback_collections_menu(callback)
+
+@router.callback_query(lambda c: c.data == "add_collection")
+async def callback_add_collection(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(SettingsState.waiting_for_collection_name)
+    await callback.message.edit_text(
+        "➕ <b>Add New Collection</b>\n\nEnter collection name:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Cancel", callback_data="collections_menu")],
+        ])
+    )
+
+@router.message(SettingsState.waiting_for_collection_name)
+async def process_collection_name(message: Message, state: FSMContext):
+    name = message.text.strip()
+    if not name:
+        await message.answer("❌ Name cannot be empty!")
+        return
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if name in collections:
+        await message.answer(f"⚠️ Collection '{name}' already exists!")
+        return
+    collections[name] = []
+    settings['keyword_collections'] = collections
+    save_settings()
+    await message.answer(f"✅ Collection '{name}' created!\n\nNow enter keywords (comma-separated):")
+    await state.set_state(SettingsState.waiting_for_collection_keywords)
+
+@router.message(SettingsState.waiting_for_collection_keywords)
+async def process_collection_keywords(message: Message, state: FSMContext):
+    keywords_text = message.text.strip()
+    keywords = [kw.strip() for kw in keywords_text.split(',') if kw.strip()]
+    if not keywords:
+        await message.answer("❌ No keywords provided!")
+        return
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    last_added = list(collections.keys())[-1]
+    collections[last_added] = keywords
+    settings['keyword_collections'] = collections
+    if settings.get('active_collection') == last_added:
+        settings['keywords'] = keywords.copy()
+    save_settings()
+    await message.answer(f"✅ Added {len(keywords)} keywords to '{last_added}': {', '.join(keywords)}")
+    await state.clear()
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active = settings.get('active_collection', 'default')
+    keyboard_rows = []
+    for name, kws in collections.items():
+        status = " ✅" if name == active else ""
+        keyboard_rows.append([InlineKeyboardButton(text=f"{name} ({len(kws)} kw){status}", callback_data=f"select_collection_{name}")])
+    keyboard_rows.append([InlineKeyboardButton(text="➕ Add Collection", callback_data="add_collection")])
+    keyboard_rows.append([InlineKeyboardButton(text="🗑️ Remove Collection", callback_data="remove_collection")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="settings")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    summary_lines = []
+    for name, kws in collections.items():
+        marker = " (active)" if name == active else ""
+        summary_lines.append(f"📁 <b>{name}</b>{marker}: {', '.join(kws)}")
+    await message.answer(
+        "📁 <b>Keyword Collections</b>\n\n" + "\n".join(summary_lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "remove_collection")
+async def callback_remove_collection(callback: CallbackQuery):
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if len(collections) <= 1:
+        await callback.answer("Cannot remove the last collection!")
+        return
+    keyboard_rows = []
+    for name in collections.keys():
+        keyboard_rows.append([InlineKeyboardButton(text=f"❌ {name}", callback_data=f"delete_collection_{name}")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Cancel", callback_data="collections_menu")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    await callback.message.edit_text(
+        "🗑️ <b>Remove Collection</b>\n\nSelect collection to remove:",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data.startswith("delete_collection_"))
+async def callback_delete_collection(callback: CallbackQuery):
+    collection_name = callback.data[len("delete_collection_"):]
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if collection_name in collections:
+        del collections[collection_name]
+        settings['keyword_collections'] = collections
+        if settings.get('active_collection') == collection_name:
+            first_key = list(collections.keys())[0]
+            settings['active_collection'] = first_key
+            settings['keywords'] = collections[first_key].copy()
+        save_settings()
+        await callback.answer(f"✅ Removed collection '{collection_name}'")
+    await callback_collections_menu(callback)
 
 @router.callback_query(lambda c: c.data == "keywords")
 async def callback_keywords(callback: CallbackQuery):
+    active = settings.get('active_collection', 'default')
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active_kw = collections.get(active, settings['keywords'])
+    display_kw = ', '.join(active_kw[:5]) + (f" ... (+{len(active_kw)-5})" if len(active_kw) > 5 else '') if active_kw else '(none)'
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add Keyword", callback_data="add_keyword")],
-        [InlineKeyboardButton(text="➖ Remove Keyword", callback_data="remove_keyword")],
+        [InlineKeyboardButton(text=f"✏️ Edit '{active}'", callback_data="edit_active_collection")],
+        [InlineKeyboardButton(text="📁 All Collections", callback_data="collections_menu")],
         [InlineKeyboardButton(text="⬅️ Back", callback_data="settings")],
     ])
     await callback.message.edit_text(
-        "🔍 <b>Keywords Management</b>\n\nCurrent: " + ', '.join(settings['keywords']),
+        f"🔑 <b>Keywords Management</b>\n\n"
+        f"📁 <b>Collection:</b> {active}\n"
+        f"🔑 <b>Keywords:</b> {display_kw}\n"
+        f"📊 <b>Total:</b> {len(active_kw)}",
         reply_markup=keyboard,
         parse_mode=ParseMode.HTML
     )
 
-@router.callback_query(lambda c: c.data == "add_keyword")
-async def callback_add_keyword(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(lambda c: c.data == "edit_active_collection")
+async def callback_edit_active_collection(callback: CallbackQuery):
+    active = settings.get('active_collection', 'default')
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active_kw = collections.get(active, settings['keywords'])
+    keyboard_rows = []
+    for kw in active_kw:
+        keyboard_rows.append([InlineKeyboardButton(text=f"❌ {kw}", callback_data=f"remove_kw_from_collection_{kw}")])
+    keyboard_rows.append([InlineKeyboardButton(text="➕ Add Keyword", callback_data="add_keyword_to_active")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="keywords")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    display_kw = ', '.join(active_kw[:5]) + (f" ... (+{len(active_kw)-5})" if len(active_kw) > 5 else '') if active_kw else '(none)'
+    await callback.message.edit_text(
+        f"✏️ <b>Edit Collection: {active}</b>\n\n"
+        f"🔑 <b>Keywords:</b> {display_kw}\n"
+        f"📊 <b>Total:</b> {len(active_kw)}",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "edit_active_collection")
+async def callback_edit_active_collection(callback: CallbackQuery):
+    active = settings.get('active_collection', 'default')
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    active_kw = collections.get(active, settings['keywords'])
+    keyboard_rows = []
+    for kw in active_kw:
+        keyboard_rows.append([InlineKeyboardButton(text=f"❌ {kw}", callback_data=f"remove_kw_from_collection_{kw}")])
+    keyboard_rows.append([InlineKeyboardButton(text="➕ Add Keyword", callback_data="add_keyword_to_active")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="keywords")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+    display_kw = ', '.join(active_kw[:5]) + (f" ... (+{len(active_kw)-5})" if len(active_kw) > 5 else '') if active_kw else '(none)'
+    await callback.message.edit_text(
+        f"✏️ <b>Edit Collection: {active}</b>\n\n"
+        f"🔑 <b>Keywords:</b> {display_kw}\n"
+        f"📊 <b>Total:</b> {len(active_kw)}",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "add_keyword_to_active")
+async def callback_add_keyword_to_active(callback: CallbackQuery, state: FSMContext):
     await state.set_state(SettingsState.waiting_for_keyword)
-    await callback.message.edit_text("📝 Enter new keyword to add:")
+    await state.update_data(editing_active=True)
+    await callback.message.edit_text("📝 Enter keyword to add to active collection:")
 
 @router.message(SettingsState.waiting_for_keyword)
 async def process_add_keyword(message: Message, state: FSMContext):
     keyword = message.text.strip()
-    if keyword not in settings['keywords']:
-        settings['keywords'].append(keyword)
-        save_settings()
-        await message.answer(f"✅ Keyword '{keyword}' added!")
+    data = await state.get_data()
+    if data.get('editing_active'):
+        active = settings.get('active_collection', 'default')
+        collections = settings.get('keyword_collections', {'default': settings['keywords']})
+        if keyword not in collections.get(active, []):
+            collections[active].append(keyword)
+            settings['keyword_collections'] = collections
+            settings['keywords'] = collections[active].copy()
+            save_settings()
+            await message.answer(f"✅ Keyword '{keyword}' added to '{active}'!")
+        else:
+            await message.answer(f"⚠️ Keyword '{keyword}' already exists in '{active}'!")
     else:
-        await message.answer(f"⚠️ Keyword '{keyword}' already exists!")
+        if keyword not in settings['keywords']:
+            settings['keywords'].append(keyword)
+            save_settings()
+            await message.answer(f"✅ Keyword '{keyword}' added!")
+        else:
+            await message.answer(f"⚠️ Keyword '{keyword}' already exists!")
     await state.clear()
     await cmd_start(message)
 
-@router.callback_query(lambda c: c.data == "remove_keyword")
-async def callback_remove_keyword(callback: CallbackQuery):
-    if not settings['keywords']:
-        await callback.answer("No keywords to remove!")
-        return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=kw, callback_data=f"remove_{kw}")] for kw in settings['keywords']
-    ] + [[InlineKeyboardButton(text="⬅️ Back", callback_data="keywords")]])
-    await callback.message.edit_text("➖ Select keyword to remove:", reply_markup=keyboard)
-
-@router.callback_query(lambda c: c.data.startswith("remove_"))
-async def callback_remove_specific(callback: CallbackQuery):
-    keyword = callback.data[7:]
-    if keyword in settings['keywords']:
-        settings['keywords'].remove(keyword)
+@router.callback_query(lambda c: c.data.startswith("remove_kw_from_collection_"))
+async def callback_remove_kw_from_collection(callback: CallbackQuery):
+    keyword = callback.data[len("remove_kw_from_collection_"):]
+    active = settings.get('active_collection', 'default')
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if keyword in collections.get(active, []):
+        collections[active].remove(keyword)
+        settings['keyword_collections'] = collections
+        settings['keywords'] = collections[active].copy()
         save_settings()
-        await callback.answer(f"✅ Removed '{keyword}'")
-    await callback_settings(callback)
+        await callback.answer(f"✅ Removed '{keyword}' from '{active}'")
+    await callback_edit_active_collection(callback)
 
 @router.callback_query(lambda c: c.data == "interval")
 async def callback_interval(callback: CallbackQuery, state: FSMContext):
@@ -2103,6 +2446,23 @@ async def callback_back_to_items(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "load_latest")
 async def callback_load_latest(callback: CallbackQuery):
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if len(collections) > 1:
+        keyboard_rows = []
+        for name, kws in collections.items():
+            if kws:
+                keyboard_rows.append([InlineKeyboardButton(text=f"📁 {name} ({len(kws)} kw)", callback_data=f"search_with_collection_{name}")])
+        keyboard_rows.append([InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")])
+        keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+        await callback.message.edit_text(
+            "📥 <b>Select Keyword Collection</b>\n\nWhich collection to search with?",
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await show_load_options(callback)
+
+async def show_load_options(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🕐 Latest 10", callback_data="load_last_10")],
         [InlineKeyboardButton(text="🕐 Latest 20", callback_data="load_last_20")],
@@ -2118,11 +2478,22 @@ async def callback_load_latest(callback: CallbackQuery):
         parse_mode=ParseMode.HTML
     )
 
+@router.callback_query(lambda c: c.data.startswith("search_with_collection_"))
+async def callback_search_with_collection(callback: CallbackQuery):
+    collection_name = callback.data[len("search_with_collection_"):]
+    collections = settings.get('keyword_collections', {'default': settings['keywords']})
+    if collection_name in collections:
+        settings['active_collection'] = collection_name
+        settings['keywords'] = collections[collection_name].copy()
+        save_settings()
+        await callback.answer(f"✅ Using collection: {collection_name}")
+    await show_load_options(callback)
+
 async def load_items_with_limit(callback: CallbackQuery, limit: int, fetch_type: str = 'last'):
     if not settings['keywords']:
         await callback.answer("No keywords set!")
         return
-    keyword = settings['keywords'][0]
+    keywords = settings['keywords']
     initial_msg = format_progress("Initializing", 0, 100, "Preparing to fetch items...")
     progress_msg = await callback.message.answer(initial_msg, parse_mode=ParseMode.HTML)
 
@@ -2133,9 +2504,9 @@ async def load_items_with_limit(callback: CallbackQuery, limit: int, fetch_type:
             pass
 
     if fetch_type == 'last':
-        items = await get_last_items_list(keyword, limit=limit, progress_callback=progress_callback)
+        items = await get_last_items_list(keywords, limit=limit, progress_callback=progress_callback)
     else:
-        items = await get_items_by_price(keyword, limit=limit, progress_callback=progress_callback)
+        items = await get_items_by_price(keywords, limit=limit, progress_callback=progress_callback)
     
     if not items:
         await bot.edit_message_text("⚠️ No items found (or fetch failed)", chat_id=progress_msg.chat.id, message_id=progress_msg.message_id)
@@ -2203,30 +2574,35 @@ async def callback_load_price_n(callback: CallbackQuery):
 async def heartbeat_loop():
     global is_master, last_heartbeat_time, is_stopped, active_devices
     
-    # Получаем HWID для этого устройства
     try:
         hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
     except:
         hwid = f"unknown-{random.randint(100000, 999999)}"
     
+    session_info = {
+        'instance_id': INSTANCE_ID,
+        'hwid': hwid,
+        'pid': os.getpid(),
+        'start_time': time.time(),
+        'is_master': False,
+    }
+    
     while not is_stopped:
         try:
-            # Обновляем статус этого устройства
-            active_devices[hwid] = time.time()
-            
-            # Очищаем устройства которые не ответили больше 10 минут
             current_time = time.time()
+            session_info['is_master'] = is_master
+            session_info['last_heartbeat'] = current_time
+            
+            active_devices[hwid] = current_time
+            
             for hwid_key in list(active_devices.keys()):
                 if current_time - active_devices[hwid_key] > 600:
                     del active_devices[hwid_key]
             
-            # Проверяем последние сообщения в чате
-            messages = await bot.get_chat_history(settings['chat_id'], limit=30)
+            messages = await bot.get_chat_history(settings['chat_id'], limit=50)
             
-            current_time = time.time()
             last_master_heartbeat = 0
             
-            # Ищем последний heartbeat и собираем активные устройства
             for msg in messages:
                 if msg.text and msg.text.startswith("❤️ HEARTBEAT"):
                     try:
@@ -2234,7 +2610,6 @@ async def heartbeat_loop():
                         msg_time = float(parts[2])
                         if msg_time > last_master_heartbeat:
                             last_master_heartbeat = msg_time
-                        # Добавляем устройство в активные если видели его меньше 10 минут назад
                         if current_time - msg_time < 600 and len(parts) > 3:
                             active_devices[parts[3]] = msg_time
                     except:
@@ -2246,24 +2621,23 @@ async def heartbeat_loop():
                     await bot.session.close()
                     sys.exit(0)
             
-            # Проверяем жив ли мастер
             master_alive = (current_time - last_master_heartbeat) < MASTER_TIMEOUT
             
             if not master_alive:
-                # Мастер мертв - пытаемся стать новым мастером
                 await bot.send_message(
                     chat_id=settings['chat_id'],
                     text=f"❤️ HEARTBEAT {current_time} {INSTANCE_ID} {hwid}",
                     disable_notification=True
                 )
                 is_master = True
+                session_info['is_master'] = True
                 if not is_monitoring:
                     start_monitoring()
                     print(f"✅ Стал мастером. Запускаю мониторинг. Instance ID: {INSTANCE_ID}")
             else:
-                # Мастер жив - мы слейв
                 if is_master:
                     is_master = False
+                    session_info['is_master'] = False
                     stop_monitoring()
                     print(f"ℹ️ Перешел в режим слейва. Instance ID: {INSTANCE_ID}")
             
@@ -2274,58 +2648,23 @@ async def heartbeat_loop():
             await asyncio.sleep(10)
 
 ADMIN_ID = 8631266527
-active_devices = {}  # HWID -> last_seen timestamp
+active_devices = {}
+
+def get_session_display_name(hwid: str) -> str:
+    return f"vintedbot-{hwid[-8:]}"
 
 @router.message(Command("stopall"))
 async def cmd_stop_all(message: Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("🛑 Отправляю команду остановки всем экземплярам бота!")
-        await bot.send_message(chat_id=settings['chat_id'], text="🛑 STOP ALL")
-        is_stopped = True
-        stop_monitoring()
-        await bot.session.close()
-        sys.exit(0)
-    else:
+    if message.from_user.id != ADMIN_ID:
         await message.answer("❌ Только администратор может использовать эту команду")
-
-@router.callback_query(lambda c: c.data == "devices")
-async def callback_devices(callback: CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("❌ Только администратор")
         return
     
-    global active_devices
-    lines = ["📋 Активные устройства:"]
-    lines.append("")
-    
-    current_time = time.time()
-    active = []
-    
-    # Очищаем устройства которые не видели больше 10 минут
-    for hwid, last_seen in list(active_devices.items()):
-        if current_time - last_seen < 600:  # 10 минут
-            active.append(f"✅ `{hwid[-12:]}`")
-        else:
-            del active_devices[hwid]
-    
-    if not active:
-        lines.append("Нет активных устройств")
-    else:
-        lines.extend(active)
-        lines.append("")
-        lines.append(f"Всего активных: {len(active)}")
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Refresh", callback_data="devices")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel")]
-    ])
-    
-    await callback.message.edit_text(
-        "\n".join(lines),
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN
-    )
-    await callback.answer()
+    await message.answer("🛑 Отправляю команду остановки всем экземплярам бота!")
+    await bot.send_message(chat_id=settings['chat_id'], text="🛑 STOP ALL")
+    is_stopped = True
+    stop_monitoring()
+    await bot.session.close()
+    sys.exit(0)
 
 @router.message(Command("devices"))
 async def cmd_devices(message: Message):
@@ -2333,28 +2672,111 @@ async def cmd_devices(message: Message):
         await message.answer("❌ Только администратор может использовать эту команду")
         return
     
-    # Отправляем в админ панель
-    await callback_devices(message)
-
-async def main():
-    global PROXIES, USE_PROXIES
-    load_settings()
-    
-    # ✅ Отладка: Получаем HWID компьютера
     try:
         hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
     except:
         hwid = f"unknown-{random.randint(100000, 999999)}"
     
-    # Отправляем отладочную информацию в телеграм
+    current_time = time.time()
+    
+    lines = []
+    lines.append("🖥️ <b>Active Sessions</b>")
+    lines.append("")
+    
+    active_count = 0
+    for session_hwid, last_seen in list(active_devices.items()):
+        age = current_time - last_seen
+        if age > 600:
+            continue
+        active_count += 1
+        is_this = " (this)" if session_hwid == hwid else ""
+        is_master_flag = " 👑" if session_hwid == hwid and is_master else ""
+        minutes = int(age // 60)
+        seconds = int(age % 60)
+        name = get_session_display_name(session_hwid)
+        lines.append(f"✅ <code>{name}</code>{is_this}{is_master_flag}")
+        lines.append(f"   ⏱️ Last seen: {minutes}m {seconds}s ago")
+        lines.append(f"   🆔 HWID: <code>{session_hwid[-12:]}</code>")
+        lines.append("")
+    
+    if not active_count:
+        lines.append("⚠️ No active sessions found")
+        lines.append("")
+    
+    lines.append(f"📊 <b>Total active: {active_count}</b>")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="devices")],
+        [InlineKeyboardButton(text="🛑 Stop All", callback_data="stopall")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_to_main")],
+    ])
+    
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+
+@router.callback_query(lambda c: c.data == "devices")
+async def callback_devices(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("❌ Только администратор")
+        return
+    
     try:
-        await bot.send_message(
-            chat_id=settings['chat_id'],
-            text=f"🤖 Бот запущен\n\n📋 Информация о системе:\nHWID: `{hwid}`\nInstance ID: `{INSTANCE_ID}`\n\n✅ Бот готов к работе.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        print(f"Не удалось отправить отладку: {e}")
+        hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+    except:
+        hwid = f"unknown-{random.randint(100000, 999999)}"
+    
+    current_time = time.time()
+    
+    lines = []
+    lines.append("🖥️ <b>Active Sessions</b>")
+    lines.append("")
+    
+    active_count = 0
+    for session_hwid, last_seen in list(active_devices.items()):
+        age = current_time - last_seen
+        if age > 600:
+            continue
+        active_count += 1
+        is_this = " (this)" if session_hwid == hwid else ""
+        is_master_flag = " 👑" if session_hwid == hwid and is_master else ""
+        minutes = int(age // 60)
+        seconds = int(age % 60)
+        name = get_session_display_name(session_hwid)
+        lines.append(f"✅ <code>{name}</code>{is_this}{is_master_flag}")
+        lines.append(f"   ⏱️ Last seen: {minutes}m {seconds}s ago")
+        lines.append(f"   🆔 HWID: <code>{session_hwid[-12:]}</code>")
+        lines.append("")
+    
+    if not active_count:
+        lines.append("⚠️ No active sessions found")
+        lines.append("")
+    
+    lines.append(f"📊 <b>Total active: {active_count}</b>")
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Refresh", callback_data="devices")],
+        [InlineKeyboardButton(text="🛑 Stop All", callback_data="stopall")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="admin_panel")],
+    ])
+    
+    await callback.message.edit_text(
+        "\n".join(lines),
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
+    await callback.answer()
+
+async def main():
+    global PROXIES, USE_PROXIES, is_master
+    load_settings()
+    
+    try:
+        hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+    except:
+        hwid = f"unknown-{random.randint(100000, 999999)}"
     
     print(f"Bot started! Instance ID: {INSTANCE_ID}")
     print(f"HWID: {hwid}")
@@ -2366,9 +2788,29 @@ async def main():
     print(f"Proxies enabled: {USE_PROXIES}")
     print(f"Loaded proxies: {len(PROXIES) if PROXIES else 0}")
     
-    # Запускаем цикл проверки мастерства
     asyncio.create_task(heartbeat_loop())
     
+    await asyncio.sleep(5)
+    
+    if not is_master:
+        print("⏳ Not master yet, waiting for heartbeat election...")
+        while not is_master and not is_stopped:
+            await asyncio.sleep(5)
+    
+    if is_stopped:
+        print("Bot stopped before becoming master")
+        return
+    
+    try:
+        await bot.send_message(
+            chat_id=settings['chat_id'],
+            text=f"🤖 VintedBot запущен (MASTER)\n\n📋 Информация о системе:\nHWID: `{hwid}`\nInstance ID: `{INSTANCE_ID}`\n\n✅ Бот готов к работе.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        print(f"Не удалось отправить отладку: {e}")
+    
+    print("✅ I am MASTER - starting polling")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
 

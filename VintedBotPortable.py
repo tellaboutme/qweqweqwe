@@ -14,7 +14,7 @@ GITHUB_REPO = "tellaboutme/qweqweqwe"
 GITHUB_BRANCH = "master"
 PYTHON_VERSION = "3.11.9"
 PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
-INSTALL_DIR = os.path.join(os.environ['APPDATA'], 'VintedBot')
+INSTALL_DIR = os.path.join(os.environ['APPDATA'], 'vintedbot')
 CONFIG_FILE = os.path.join(INSTALL_DIR, 'config.dat')
 
 def generate_key():
@@ -135,7 +135,7 @@ def update_bot():
 def add_to_startup():
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, "VintedBot", 0, winreg.REG_SZ, f'"{sys.executable}"')
+        winreg.SetValueEx(key, "vintedbot", 0, winreg.REG_SZ, f'"{sys.executable}"')
         winreg.CloseKey(key)
         return True
     except:
@@ -175,7 +175,7 @@ def check_for_updates():
             r.raise_for_status()
             
             # Сохраняем новый exe
-            new_exe = os.path.join(tempfile.gettempdir(), "VintedBot_new.exe")
+            new_exe = os.path.join(tempfile.gettempdir(), "vintedbot_new.exe")
             with open(new_exe, 'wb') as f:
                 f.write(r.content)
             
