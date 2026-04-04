@@ -1033,9 +1033,13 @@ async def check_monitoring_urls(urls: List[str], user_id: int = None) -> List[tu
                 if not href:
                     continue
                 
-                # ✅ Critical: Apply keyword filter HERE before processing further
-                has_sw = 'swear' in title_attr or 'swear london' in title_attr
-                if not has_sw:
+                # ✅ Critical: Apply ALL user-configured keywords filter HERE
+                has_keyword = False
+                for kw in settings['keywords']:
+                    if kw.lower() in title_attr:
+                        has_keyword = True
+                        break
+                if not has_keyword:
                     continue
                 
                 # Build full URL first

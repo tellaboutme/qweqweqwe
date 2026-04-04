@@ -58,8 +58,15 @@ def load_config():
 
 def is_python_installed():
     try:
-        subprocess.run(['python', '--version'], capture_output=True, check=True)
-        return True
+        result = subprocess.run(['python', '--version'], capture_output=True, text=True, check=True)
+        version_output = result.stdout.strip()
+        # Проверяем что версия >= 3.11 и < 3.12
+        if 'Python 3.11.' in version_output:
+            return True
+        # Также принимаем 3.12 и 3.13 если они есть
+        if 'Python 3.12.' in version_output or 'Python 3.13.' in version_output:
+            return True
+        return False
     except:
         return False
 
