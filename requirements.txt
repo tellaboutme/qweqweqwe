@@ -2,5 +2,4 @@ aiogram==3.17.0
 requests==2.32.3
 beautifulsoup4==4.12.3
 pydantic==2.10.3
-pydantic-core==2.27.2
 python-dotenv==1.0.1
