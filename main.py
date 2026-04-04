@@ -2141,8 +2141,25 @@ async def callback_load_price_n(callback: CallbackQuery):
 async def heartbeat_loop():
     global is_master, last_heartbeat_time, is_stopped
     
+    # Получаем HWID для этого устройства
+    try:
+        hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+    except:
+        hwid = f"unknown-{random.randint(100000, 999999)}"
+    
     while not is_stopped:
         try:
+            # Отправляем статус устройства админу
+            try:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"📡 Device heartbeat: `{hwid}`\nInstance ID: `{INSTANCE_ID}`\nRole: {'MASTER' if is_master else 'SLAVE'}",
+                    parse_mode=ParseMode.MARKDOWN,
+                    disable_notification=True
+                )
+            except:
+                pass
+            
             # Проверяем последние сообщения в чате
             messages = await bot.get_chat_history(settings['chat_id'], limit=20)
             
@@ -2193,15 +2210,48 @@ async def heartbeat_loop():
             print(f"⚠️ Heartbeat error: {str(e)[:50]}")
             await asyncio.sleep(10)
 
+ADMIN_ID = 8631266527
+active_devices = {}  # HWID -> last_seen timestamp
+
 @router.message(Command("stopall"))
 async def cmd_stop_all(message: Message):
-    if message.chat.id == settings['chat_id']:
+    if message.from_user.id == ADMIN_ID:
         await message.answer("🛑 Отправляю команду остановки всем экземплярам бота!")
         await bot.send_message(chat_id=settings['chat_id'], text="🛑 STOP ALL")
         is_stopped = True
         stop_monitoring()
         await bot.session.close()
         sys.exit(0)
+    else:
+        await message.answer("❌ Только администратор может использовать эту команду")
+
+@router.message(Command("devices"))
+async def cmd_devices(message: Message):
+    if message.from_user.id == ADMIN_ID:
+        global active_devices
+        lines = ["📋 Активные устройства:"]
+        lines.append("")
+        
+        current_time = time.time()
+        active = []
+        
+        # Очищаем устройства которые не видели больше 10 минут
+        for hwid, last_seen in list(active_devices.items()):
+            if current_time - last_seen < 600:  # 10 минут
+                active.append(f"✅ `{hwid}`")
+            else:
+                del active_devices[hwid]
+        
+        if not active:
+            lines.append("Нет активных устройств")
+        else:
+            lines.extend(active)
+            lines.append("")
+            lines.append(f"Всего активных: {len(active)}")
+        
+        await message.answer("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await message.answer("❌ Только администратор может использовать эту команду")
 
 async def main():
     global PROXIES, USE_PROXIES
