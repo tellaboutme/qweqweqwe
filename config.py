@@ -1,8 +1,14 @@
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 # Telegram Bot Token from BotFather
-BOT_TOKEN = '8710493220:AAGnlmHyZ5ThwIsLgbf0iDZ3LPSdtA1QkO8'
+BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 # Chat ID where to send notifications (get it from @userinfobot or by interacting with the bot)
-CHAT_ID = "1779986370"
+CHAT_ID = os.getenv('CHAT_ID')
 
 # Keywords to search for
 KEYWORDS = ['Swear London']
@@ -27,9 +33,7 @@ VINTED_SEARCH_URL = 'https://{domain}/catalog?search_text={keyword}&order=newest
 # Proxies for rotating requests (to avoid IP bans)
 # Format: 'ip:port' for HTTP proxies or 'socks5://user:pass@ip:port' for SOCKS5
 # Leave empty list to use no proxies
-PROXIES = [
-    'socks5://peterkolushov:3KhkzXxB6J@193.124.16.227:50101',
-]
+PROXIES = os.getenv('PROXIES', '').split(',') if os.getenv('PROXIES') else []
 
 # Enable/disable proxy usage globally
 USE_PROXIES = False
