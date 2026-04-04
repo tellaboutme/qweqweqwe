@@ -145,77 +145,93 @@ def add_to_startup():
     except:
         return False
 
+def show_error(message):
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Vinted Bot", message)
+        root.destroy()
+    except:
+        pass
+
 def main():
-    # Check if running as exe
-    if getattr(sys, 'frozen', False):
-        os.chdir(os.path.dirname(sys.executable))
-    
-    print("🚀 Vinted Bot Portable Launcher")
-    print("="*40)
-    
-    # Check config
-    config = load_config()
-    if not config:
-        print("\n⚠️ Первая настройка:")
-        bot_token = input("Введите BOT_TOKEN: ").strip()
-        chat_id = input("Введите CHAT_ID: ").strip()
-        save_config(bot_token, chat_id)
-        print("✅ Конфиг сохранен зашифрованным!")
-    
-    # Install Python if needed
-    python_path = None
-    if is_python_installed():
-        python_path = 'python'
-    else:
-        python_path = install_python()
-    
-    if not python_path:
-        input("❌ Не удалось установить Python. Нажмите Enter чтобы выйти.")
-        sys.exit(1)
-    
-    # Install dependencies
-    install_dependencies(python_path)
-    
-    # Update bot
-    update_bot()
-    
-    # Add to startup
-    add_to_startup()
-    
-    # Set environment variables
-    config = load_config()
-    os.environ['BOT_TOKEN'] = config['BOT_TOKEN']
-    os.environ['CHAT_ID'] = config['CHAT_ID']
-    
-    print("\n✅ Все готово! Запускаю бота...")
-    
-    # Start bot completely hidden
-    bot_dir = os.path.join(INSTALL_DIR, 'bot')
-    main_py = os.path.join(bot_dir, 'main.py')
-    
-    if os.path.exists(main_py):
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = 0
+    try:
+        # Check if running as exe
+        if getattr(sys, 'frozen', False):
+            os.chdir(os.path.dirname(sys.executable))
         
-        subprocess.Popen(
-            [python_path, main_py],
-            cwd=bot_dir,
-            env=os.environ.copy(),
-            startupinfo=startupinfo,
-            creationflags=0x08000000
-        )
-    
-    print("✅ Бот запущен в фоновом режиме!")
-    print("✅ Добавлен в автозапуск Windows")
-    
-    # Auto close after 3 seconds
-    import time
-    time.sleep(3)
+        # Check config
+        config = load_config()
+        if not config:
+            import tkinter as tk
+            from tkinter import simpledialog
+            
+            root = tk.Tk()
+            root.withdraw()
+            
+            bot_token = simpledialog.askstring("Vinted Bot", "Введите BOT_TOKEN:", show='*')
+            if not bot_token:
+                return
+                
+            chat_id = simpledialog.askstring("Vinted Bot", "Введите CHAT_ID:")
+            if not chat_id:
+                return
+                
+            save_config(bot_token, chat_id)
+            
+            root.destroy()
+        
+        # Install Python if needed
+        python_path = None
+        if is_python_installed():
+            python_path = 'python'
+        else:
+            python_path = install_python()
+        
+        if not python_path:
+            show_error("Не удалось установить Python")
+            return
+        
+        # Install dependencies
+        install_dependencies(python_path)
+        
+        # Update bot
+        update_bot()
+        
+        # Add to startup
+        add_to_startup()
+        
+        # Set environment variables
+        config = load_config()
+        if config:
+            os.environ['BOT_TOKEN'] = config['BOT_TOKEN']
+            os.environ['CHAT_ID'] = config['CHAT_ID']
+        
+        # Start bot completely hidden
+        bot_dir = os.path.join(INSTALL_DIR, 'bot')
+        main_py = os.path.join(bot_dir, 'main.py')
+        
+        if os.path.exists(main_py):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0
+            
+            subprocess.Popen(
+                [python_path, main_py],
+                cwd=bot_dir,
+                env=os.environ.copy(),
+                startupinfo=startupinfo,
+                creationflags=0x08000000
+            )
+        
+        # Auto close after 1 second
+        import time
+        time.sleep(1)
+        
+    except Exception as e:
+        show_error(f"Ошибка: {str(e)}")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"❌ Ошибка: {e}")
-        input("\nНажмите Enter чтобы выйти.")
+    main()
