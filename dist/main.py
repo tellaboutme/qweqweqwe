@@ -6,6 +6,7 @@ import os
 import random
 import re
 import signal
+import subprocess
 import sys
 import time
 
@@ -2512,7 +2513,7 @@ async def load_items_with_limit(callback: CallbackQuery, limit: int, fetch_type:
         await bot.edit_message_text("⚠️ No items found (or fetch failed)", chat_id=progress_msg.chat.id, message_id=progress_msg.message_id)
         return
 
-    cache_items(items, fetch_type, limit, keywords[0])
+    cache_items(items, fetch_type, limit, keyword)
     page = 1
     page_items = get_page_items(page)
     max_pages = get_max_pages()
