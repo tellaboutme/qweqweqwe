@@ -1287,10 +1287,13 @@ def stop_monitoring():
     if monitoring_task:
         monitoring_task.cancel()
 
-async def _fetch_search_html(session: aiohttp.ClientSession, domain: str, keyword: str):
-    url = VINTED_SEARCH_URL.format(domain=domain, keyword=keyword.replace(' ', '+'))
+async def _fetch_search_html(session: aiohttp.ClientSession, domain: str, keyword: str, order: str = 'newest_first'):
+    if order == 'price_low_to_high':
+        url = f"https://{domain}/catalog?search_text={keyword.replace(' ', '+')}&order=price_low_to_high&page=1"
+    else:
+        url = VINTED_SEARCH_URL.format(domain=domain, keyword=keyword.replace(' ', '+'))
     
-    max_attempts = 5
+    max_attempts = 8
     
     for attempt in range(max_attempts):
         # Fixed minimal delay between requests
@@ -1301,7 +1304,12 @@ async def _fetch_search_html(session: aiohttp.ClientSession, domain: str, keywor
         
         try:
             headers = get_random_headers()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), headers=headers, proxy=proxy_url) as resp:
+            headers['Referer'] = f'https://{domain}/'
+            headers['Accept-Language'] = 'pl-PL,pl;q=0.9,it-IT;q=0.8,it;q=0.7,en-US;q=0.6,en;q=0.5'
+            headers['Sec-Fetch-Site'] = 'same-origin'
+            headers['Sec-Fetch-Mode'] = 'navigate'
+            headers['Sec-Fetch-Dest'] = 'document'
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=25), headers=headers, proxy=proxy_url) as resp:
                 status_code = resp.status
                 html = await resp.text()
                 
@@ -1349,7 +1357,7 @@ async def get_items_by_price(keywords: List[str], limit: int = 10, progress_call
 
     try:
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-            tasks = [_fetch_search_html(session, domain, search_keyword) for domain in VINTED_DOMAINS]
+            tasks = [_fetch_search_html(session, domain, search_keyword, order='price_low_to_high') for domain in VINTED_DOMAINS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             domain_count = len(VINTED_DOMAINS)
 
@@ -1360,7 +1368,7 @@ async def get_items_by_price(keywords: List[str], limit: int = 10, progress_call
                     continue
                 domain, html = result
                 soup = BeautifulSoup(html, 'html.parser')
-                raw_items = soup.select('a[href*="/items/"]')[:limit+20]
+                raw_items = soup.select('a[href*="/items/"]')[:limit*3]
                 total_cards = len(raw_items)
                 raw_items = [item for item in raw_items if is_valid_product_card(item)]
                 print(f"✅ Found {len(raw_items)} valid product cards from {total_cards} on {domain}")
@@ -1472,7 +1480,7 @@ async def get_last_items_list(keywords: List[str], limit: int = 10, progress_cal
 
     try:
         async with aiohttp.ClientSession(headers={'User-Agent': 'Mozilla/5.0'}) as session:
-            tasks = [_fetch_search_html(session, domain, search_keyword) for domain in VINTED_DOMAINS]
+            tasks = [_fetch_search_html(session, domain, search_keyword, order='newest_first') for domain in VINTED_DOMAINS]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             domain_count = len(VINTED_DOMAINS)
 
@@ -1483,7 +1491,7 @@ async def get_last_items_list(keywords: List[str], limit: int = 10, progress_cal
                     continue
                 domain, html = result
                 soup = BeautifulSoup(html, 'html.parser')
-                raw_items = soup.select('a[href*="/items/"]')[:limit+20]
+                raw_items = soup.select('a[href*="/items/"]')[:limit*3]
                 total_cards = len(raw_items)
                 raw_items = [item for item in raw_items if is_valid_product_card(item)]
                 print(f"✅ Found {len(raw_items)} valid product cards from {total_cards} on {domain}")
