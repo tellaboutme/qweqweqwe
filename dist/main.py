@@ -2587,59 +2587,68 @@ async def heartbeat_loop():
         'is_master': False,
     }
     
+async def heartbeat_loop():
+    global is_master, last_heartbeat_time, is_stopped, active_devices
+    
+    try:
+        hwid = subprocess.check_output('wmic csproduct get uuid').decode().split('\n')[1].strip()
+    except:
+        hwid = f"unknown-{random.randint(100000, 999999)}"
+    
+    session_info = {
+        'instance_id': INSTANCE_ID,
+        'hwid': hwid,
+        'pid': os.getpid(),
+        'start_time': time.time(),
+        'is_master': False,
+    }
+    
+    last_master_time = time.time()
+    
     while not is_stopped:
         try:
             current_time = time.time()
             session_info['is_master'] = is_master
             session_info['last_heartbeat'] = current_time
             
+            # Register this device
             active_devices[hwid] = current_time
             
+            # Cleanup old devices (>10 minutes)
             for hwid_key in list(active_devices.keys()):
                 if current_time - active_devices[hwid_key] > 600:
                     del active_devices[hwid_key]
             
-            messages = await bot.get_messages(chat_id=settings['chat_id'], limit=50)
+            # Simple master election: smallest instance ID becomes master
+            all_instance_ids = [int(key) for key in active_devices.keys() if key.isdigit()]
             
-            last_master_heartbeat = 0
-            
-            for msg in messages:
-                if msg.text and msg.text.startswith("❤️ HEARTBEAT"):
-                    try:
-                        parts = msg.text.split()
-                        msg_time = float(parts[2])
-                        if msg_time > last_master_heartbeat:
-                            last_master_heartbeat = msg_time
-                        if current_time - msg_time < 600 and len(parts) > 3:
-                            active_devices[parts[3]] = msg_time
-                    except:
-                        pass
-                if msg.text and msg.text == "🛑 STOP ALL":
-                    print("🛑 Получена команда глобальной остановки!")
-                    is_stopped = True
-                    stop_monitoring()
-                    await bot.session.close()
-                    sys.exit(0)
-            
-            master_alive = (current_time - last_master_heartbeat) < MASTER_TIMEOUT
-            
-            if not master_alive:
-                await bot.send_message(
-                    chat_id=settings['chat_id'],
-                    text=f"❤️ HEARTBEAT {current_time} {INSTANCE_ID} {hwid}",
-                    disable_notification=True
-                )
+            if not all_instance_ids:
+                # We are the first one
                 is_master = True
-                session_info['is_master'] = True
+                last_master_time = current_time
+            else:
+                min_instance = min(all_instance_ids)
+                if int(INSTANCE_ID) == min_instance:
+                    if not is_master:
+                        is_master = True
+                        print(f"✅ Became master. Instance ID: {INSTANCE_ID}")
+                        if not is_monitoring:
+                            start_monitoring()
+                    last_master_time = current_time
+                else:
+                    if is_master:
+                        is_master = False
+                        print(f"ℹ️ Demoted to slave. Instance ID: {INSTANCE_ID}")
+                        stop_monitoring()
+            
+            # Check if we haven't seen master for too long
+            if current_time - last_master_time > MASTER_TIMEOUT:
+                # No master alive, try to become master
+                is_master = True
+                last_master_time = current_time
+                print(f"✅ Took over as master (timeout). Instance ID: {INSTANCE_ID}")
                 if not is_monitoring:
                     start_monitoring()
-                    print(f"✅ Стал мастером. Запускаю мониторинг. Instance ID: {INSTANCE_ID}")
-            else:
-                if is_master:
-                    is_master = False
-                    session_info['is_master'] = False
-                    stop_monitoring()
-                    print(f"ℹ️ Перешел в режим слейва. Instance ID: {INSTANCE_ID}")
             
             await asyncio.sleep(HEARTBEAT_INTERVAL)
             
